@@ -1,4 +1,4 @@
-const express = require("express");
+/*const express = require("express");
 const bodyParser = require("body-parser");
 const mysql = require("mysql");
 const bcrypt = require("bcrypt");
@@ -11,6 +11,7 @@ const wsPort = 8081;
 // Configurer les détails de connexion à la base de données MySQL
 const connection = mysql.createConnection({
   host: "localhost",
+  port:3307,
   user: "root",
   password: "",
   database: "DEMONS",
@@ -108,14 +109,14 @@ wss.on("connection", (ws, req) => {
           handleConnectionRequest(data.data);
           break;
         case "connexion-request-response":
-          console.log("clients", Array.from(clients.keys()));
           console.log(`Retour :  ${JSON.stringify(data)}`);
           handleConnexionRequestResponse(data.data);
           break;
-        case "offer-from-sender":
-          console.log("routing offer");
+        case "offer":
+          console.log("offer:", data.data);
           // send to the electron app
           handleOffer(data.data);
+
           break;
         case "answer":
           console.log("routing answer");
@@ -181,11 +182,9 @@ function handleConnectionRequest(data) {
 }
 function handleConnexionRequestResponse(data) {
   const { receiverName, senderName, requestAccepted } = data;
-  console.log("clients", Array.from(clients.keys()));
-  console.log("receiverName", receiverName);
   const receiverWs = clients.get(receiverName);
 
- /* console.log("senderWs", senderWs);*/
+  /* console.log("senderWs", senderWs);
   console.log({ receiverName, senderName, requestAccepted });
   receiverWs.send(
     JSON.stringify({
@@ -196,16 +195,18 @@ function handleConnexionRequestResponse(data) {
 }
 
 function handleOffer(data) {
-  const { receiverId, senderName, offer } = data;
-  const senderWs = clients.get(senderName);
-  senderWs.send(
-    JSON.stringify({ type: "offer", data: { receiverId, senderName, offer } })
+  const { receiverName, senderName, offer } = data;
+  const receiverWs = clients.get(receiverName);
+  console.log("data:", data.remotePeerConnection);
+  receiverWs.send(
+    JSON.stringify({ type: "offer", data: { receiverName, senderName, offer } })
   );
 }
 
 function handleAnswer(data) {
   const { receiverId, senderName, answer } = data;
   const senderWs = clients.get(senderName);
+
   senderWs.send(
     JSON.stringify({ type: "answer", data: { receiverId, senderName, answer } })
   );
@@ -265,6 +266,253 @@ function startScreenSharing(destinataireNom, initiatorNom) {
 }
 
 // Démarrer le serveur
+app.listen(port, () => {
+  console.log(`Serveur démarré sur le port ${port}`);
+});*/
+
+const express = require("express");
+const bodyParser = require("body-parser");
+const mysql = require("mysql");
+const bcrypt = require("bcrypt");
+const WebSocket = require("ws");
+
+const app = express();
+const port = 8000;
+const wsPort = 8081;
+
+// Configuration de la base de données MySQL (inchangée)
+const connection = mysql.createConnection({
+  host: "localhost",
+  port:3307,
+  user: "root",
+  password: "",
+  database: "DEMONS",
+});
+
+app.use(bodyParser.json());
+
+const wss = new WebSocket.Server({ port: wsPort });
+const clients = new Map();
+
+// Route pour recevoir la demande d'identifiants
+app.post("/demande-identifiants", (req, res) => {
+  const { nom_pc } = req.body.clientInfo;
+
+  console.log("Requête de demande d'identifiants reçue : ", nom_pc);
+
+  // Générer un ID unique pour ce client
+  const generatedId = generateId();
+
+  // Enregistrer l'ID et le nom de l'ordinateur dans la base de données
+  insertClientInfo(generatedId, nom_pc)
+    .then(() => {
+      // Envoyer l'ID dans la réponse
+      res.json({ random_id: generatedId });
+    })
+    .catch((error) => {
+      console.error(
+        "Erreur lors de l'enregistrement des données dans la base de données :",
+        error
+      );
+      res.status(500).json({
+        error: "Une erreur est survenue lors de l'enregistrement des données.",
+      });
+    });
+});
+
+// Fonction pour générer un ID unique
+function generateId() {
+  return Math.floor(Math.random() * 1000000) + 1;
+}
+
+// Fonction pour insérer les informations du client dans la base de données
+function insertClientInfo(generatedId, nomPc) {
+  return new Promise((resolve, reject) => {
+    const query = "INSERT INTO Client (random_id, nom_pc) VALUES (?, ?)";
+    connection.query(query, [generatedId, nomPc], (err, result) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+// Fonction pour récupérer les informations de l'ordinateur depuis la base de données
+function getComputerInfo(randomId) {
+  return new Promise((resolve, reject) => {
+    const query = "SELECT nom_pc, random_id FROM Client WHERE random_id = ?";
+    connection.query(query, [randomId], (err, result) => {
+      if (err) {
+        reject(err);
+      } else {
+        if (result.length > 0) {
+          resolve(result[0]);
+        } else {
+          resolve(null);
+        }
+      }
+    });
+  });
+}
+
+// Modifier la gestion des connexions WebSocket
+wss.on("connection", (ws, req) => {
+  let clientName = null;
+
+  ws.on("message", (message) => {
+    try {
+      const data = JSON.parse(message);
+      switch (data.type) {
+        case "register":
+          clientName = data.nomPc;
+          clients.set(clientName, ws);
+          console.log(`Nouvelle connexion depuis ${clientName}`);
+          break;
+        case "connexion-request-from-sender":
+          handleConnectionRequest(data.data);
+          break;
+        case "connexion-request-response":
+          handleConnexionRequestResponse(data.data);
+          break;
+        case "offer":
+        case "answer":
+        case "ice-candidate":
+        case "control":
+          routeMessage(data);
+          break;
+        default:
+          console.error(`Type de message inconnu: ${data.type}`);
+      }
+    } catch (error) {
+      console.error(`Erreur lors du traitement du message: ${error}`);
+    }
+  });
+
+  ws.on("close", () => {
+    console.log(`Client ${clientName} déconnecté`);
+    clients.delete(clientName);
+  });
+});
+
+function routeMessage(data) {
+  const targetClient = clients.get(data.receiverName);
+  if (targetClient) {
+    targetClient.send(JSON.stringify(data));
+  } else {
+    console.error(`Client cible non trouvé: ${data.receiverName}`);
+  }
+}
+
+// Fonction pour gérer la réponse du destinataire à la demande de connexion
+function handleConnectionRequest(data) {
+  const { receiverId, senderName } = data;
+  // Rechercher les informations de connexion de l'initiateur dans la base de données
+  getClientInfo(receiverId)
+    .then((receiverInfo) => {
+      if (receiverInfo) {
+        console.log("receiverInfo :", receiverInfo);
+        const { nom_pc } = receiverInfo;
+        const receiverWs = clients.get(nom_pc);
+        receiverWs.send(
+          JSON.stringify({
+            type: "connexion-request-to-receiver",
+            data: {
+              receiverName: nom_pc,
+              senderName,
+            },
+          })
+        );
+      } else {
+        console.error(
+          `Impossible de trouver les informations de connexion pour l'ID ${ID}`
+        );
+      }
+    })
+    .catch((error) => {
+      console.error(
+        "Erreur lors de la recherche des informations de connexion :",
+        error
+      );
+    });
+}
+function handleConnexionRequestResponse(data) {
+  const { receiverName, senderName, requestAccepted } = data;
+  const receiverWs = clients.get(receiverName);
+
+  /* console.log("senderWs", senderWs);*/
+  console.log({ receiverName, senderName, requestAccepted });
+  receiverWs.send(
+    JSON.stringify({
+      type: "connexion-request-response-to-client",
+      data: { receiverName, senderName, requestAccepted },
+    })
+  );
+}
+
+function handleOffer(data) {
+  const { receiverName, senderName, offer } = data;
+  const receiverWs = clients.get(receiverName);
+  console.log("data:", data.remotePeerConnection);
+  receiverWs.send(
+    JSON.stringify({ type: "offer", data: { receiverName, senderName, offer } })
+  );
+}
+
+function handleAnswer(data) {
+  const { receiverId, senderName, answer } = data;
+  const senderWs = clients.get(senderName);
+
+  senderWs.send(
+    JSON.stringify({ type: "answer", data: { receiverId, senderName, answer } })
+  );
+}
+
+function handleControl(data) {
+  const { receiverId, senderName, answer } = data;
+  const senderWs = clients.get(senderName);
+  senderWs.send(JSON.stringify({ type: "control", data }));
+}
+
+// Fonction pour envoyer la réponse de connexion à l'adresse IP de l'initiateur
+function sendConnectionResponse(initiatorName, accepted) {
+  return new Promise((resolve, reject) => {
+    // Rechercher la connexion WebSocket de l'initiateur
+    const initiateur = clients.get(initiatorName);
+
+    if (initiateur) {
+      // Envoyer la réponse de connexion à l'initiateur via WebSocket
+      initiateur.send(JSON.stringify({ type: "connectionResponse", accepted }));
+      resolve();
+    } else {
+      reject(
+        new Error(
+          `Impossible d'envoyer la réponse de connexion, l'initiateur ${initiatorName} n'est pas connecté.`
+        )
+      );
+    }
+  });
+}
+
+// Fonction pour récupérer les informations de connexion du receveur
+function getClientInfo(clientId) {
+  return new Promise((resolve, reject) => {
+    const query = "SELECT nom_pc FROM Client WHERE random_id = ?";
+    connection.query(query, [clientId], (err, result) => {
+      if (err) {
+        reject(err);
+      } else {
+        if (result.length > 0) {
+          resolve(result[0]);
+        } else {
+          resolve(null);
+        }
+      }
+    });
+  });
+}
+
 app.listen(port, () => {
   console.log(`Serveur démarré sur le port ${port}`);
 });
